@@ -69,45 +69,28 @@ curl -L https://raw.githubusercontent.com/prestige12138/bypass-mdm-external/main
 - System Volume (e.g., "Macintosh HD", "MacOS", or your custom name)
 - Data Volume (e.g., "Data", "Macintosh HD - Data", or your custom name)
 
-### External macOS Installation: GoldenGate
+### 💽 External Drive Support
 
-Run the downloaded script with `--require-external`. Move the highlight to `GoldenGate [External]` and press Enter:
+The script can target macOS installed on an external drive without modifying the internal system. Run it in Recovery:
+
+```bash
+curl -fL https://raw.githubusercontent.com/prestige12138/bypass-mdm-external/main/bypass-mdm-v2.sh -o bypass-mdm.sh && chmod +x bypass-mdm.sh && ./bypass-mdm.sh --require-external
+```
+
+Use the Up/Down arrow keys to select the external System volume, then press Enter:
 
 ```text
-./bypass-mdm.sh --require-external
-
-ℹ Mounted macOS system volumes:
-Use Up/Down arrows to choose a macOS system volume, then press Enter.
-
    Macintosh HD [Internal]
  > GoldenGate [External]
 ```
 
-The script uses the selected System volume and automatically matches `GoldenGate - Data` by APFS Volume Group ID. To check the selection without changing any files:
-
-```text
-./bypass-mdm.sh --require-external --validate-only
-
-Use Up/Down arrows to highlight GoldenGate, then press Enter.
-```
-
-When standard input is not an interactive terminal, the script automatically falls back to a numbered menu for automation compatibility.
-
-Command-line selection remains available for automation:
+The matching Data volume is selected and verified through its APFS Volume Group ID. To validate the selection without making changes:
 
 ```bash
-./bypass-mdm.sh --system-volume "GoldenGate" --require-external
+./bypass-mdm.sh --require-external --validate-only
 ```
 
-The script checks that:
-
-- Both volumes are mounted under `/Volumes`
-- `GoldenGate` contains a macOS system installation
-- `GoldenGate - Data` contains the matching local Directory Services database
-- Both volumes have the same APFS Volume Group ID
-- Both volumes are reported as external media
-
-The Data volume is never renamed. If `GoldenGate - Data` is missing or unmounted, the script stops instead of falling back to the internal macOS installation. Mount it in Disk Utility first; if the volume does not exist, finish installing macOS on the external drive before running this script.
+The script stops if the external volumes are not mounted, do not match, or an internal volume is selected.
 
 **7.** **Select Option 1** - "Bypass MDM from Recovery"
 
