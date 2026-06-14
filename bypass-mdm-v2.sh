@@ -9,6 +9,18 @@ PUR='\033[1;35m'
 CYAN='\033[1;36m'
 NC='\033[0m'
 
+VOLUMES_ROOT="${VOLUMES_ROOT:-/Volumes}"
+DISKUTIL_BIN="${DISKUTIL_BIN:-diskutil}"
+PLISTBUDDY_BIN="${PLISTBUDDY_BIN:-/usr/libexec/PlistBuddy}"
+
+requested_system_volume=""
+requested_data_volume=""
+require_external=false
+validate_only=false
+target_volume_group_id=""
+SYSTEM_VOLUME_CANDIDATES=()
+SYSTEM_VOLUME_LABELS=()
+
 # Error handling function
 error_exit() {
 	echo -e "${RED}ERROR: $1${NC}" >&2
@@ -28,6 +40,98 @@ success() {
 # Info function
 info() {
 	echo -e "${BLU}ℹ $1${NC}"
+}
+
+usage() {
+	cat <<'EOF'
+Usage: bypass-mdm-v2.sh [options]
+
+Options:
+  --system-volume NAME  Target macOS system volume name (interactive menu if omitted)
+  --data-volume NAME    Target macOS data volume name
+  --require-external    Refuse to operate unless both volumes are external
+  --validate-only       Validate the target without changing any files
+  -h, --help            Show this help
+
+Example:
+  ./bypass-mdm-v2.sh \
+    --system-volume "GoldenGate" \
+    --data-volume "GoldenGate - Data" \
+    --require-external
+EOF
+}
+
+validate_volume_name() {
+	local volume_name="$1"
+
+	if [ -z "$volume_name" ]; then
+		echo "Volume name cannot be empty"
+		return 1
+	fi
+
+	case "$volume_name" in
+	"." | ".." | */* | *$'\n'* | *$'\r'*)
+		echo "Volume name must be a direct child of $VOLUMES_ROOT"
+		return 1
+		;;
+	esac
+
+	return 0
+}
+
+parse_arguments() {
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--system-volume)
+			[ $# -ge 2 ] || error_exit "--system-volume requires a volume name"
+			requested_system_volume="$2"
+			shift 2
+			;;
+		--data-volume)
+			[ $# -ge 2 ] || error_exit "--data-volume requires a volume name"
+			requested_data_volume="$2"
+			shift 2
+			;;
+		--require-external)
+			require_external=true
+			shift
+			;;
+		--validate-only)
+			validate_only=true
+			shift
+			;;
+		-h | --help)
+			usage
+			exit 0
+			;;
+		*)
+			error_exit "Unknown option: $1"
+			;;
+		esac
+	done
+}
+
+disk_info_value() {
+	local volume_path="$1"
+	local key="$2"
+	local plist_file
+	local value
+
+	plist_file=$(mktemp "${TMPDIR:-/tmp}/bypass-mdm-disk-info.XXXXXX") || return 1
+	if ! "$DISKUTIL_BIN" info -plist "$volume_path" >"$plist_file" 2>/dev/null; then
+		rm -f "$plist_file"
+		return 1
+	fi
+
+	value=$("$PLISTBUDDY_BIN" -c "Print :$key" "$plist_file" 2>/dev/null)
+	local status=$?
+	rm -f "$plist_file"
+
+	if [ $status -ne 0 ]; then
+		return $status
+	fi
+
+	printf '%s\n' "$value"
 }
 
 # Validation function for username
@@ -110,73 +214,290 @@ find_available_uid() {
 	return 1
 }
 
-# Function to detect system volumes with multiple fallback strategies
-detect_volumes() {
-	local system_vol=""
-	local data_vol=""
+discover_system_volumes() {
+	local volume_path
 
-	info "Detecting system volumes..." >&2
-
-	# Strategy 1: Look for common macOS APFS volume patterns
-	# List all volumes and look for system volume (ends with or contains common names)
-	for vol in /Volumes/*; do
-		if [ -d "$vol" ]; then
-			vol_name=$(basename "$vol")
-
-			# Check if this looks like a system volume (not Data, not recovery)
-			if [[ ! "$vol_name" =~ "Data"$ ]] && [[ ! "$vol_name" =~ "Recovery" ]] && [ -d "$vol/System" ]; then
-				system_vol="$vol_name"
-				info "Found system volume: $system_vol" >&2
-				break
-			fi
-		fi
+	SYSTEM_VOLUME_CANDIDATES=()
+	SYSTEM_VOLUME_LABELS=()
+	for volume_path in "$VOLUMES_ROOT"/*; do
+		[ ! -L "$volume_path" ] || continue
+		[ -d "$volume_path/System/Library/CoreServices" ] || continue
+		SYSTEM_VOLUME_CANDIDATES+=("$(basename "$volume_path")")
+		SYSTEM_VOLUME_LABELS+=("$(volume_location_label "$volume_path")")
 	done
 
-	# Strategy 2: If no system volume found, try looking for any volume with /System directory
-	if [ -z "$system_vol" ]; then
-		for vol in /Volumes/*; do
-			if [ -d "$vol/System" ]; then
-				system_vol=$(basename "$vol")
-				warn "Using volume with /System directory: $system_vol" >&2
-				break
-			fi
-		done
+	if [ "${#SYSTEM_VOLUME_CANDIDATES[@]}" -eq 0 ]; then
+		error_exit "No mounted macOS system volumes were found under $VOLUMES_ROOT"
 	fi
-
-	# Strategy 3: Check for Data volume
-	if [ -d "/Volumes/Data" ]; then
-		data_vol="Data"
-		info "Found data volume: $data_vol" >&2
-	elif [ -n "$system_vol" ] && [ -d "/Volumes/$system_vol - Data" ]; then
-		data_vol="$system_vol - Data"
-		info "Found data volume: $data_vol" >&2
-	else
-		# Look for any volume ending with "Data"
-		for vol in /Volumes/*Data; do
-			if [ -d "$vol" ]; then
-				data_vol=$(basename "$vol")
-				warn "Found data volume: $data_vol" >&2
-				break
-			fi
-		done
-	fi
-
-	# Validate findings
-	if [ -z "$system_vol" ]; then
-		error_exit "Could not detect system volume. Please ensure you're running this in Recovery mode with a macOS installation present."
-	fi
-
-	if [ -z "$data_vol" ]; then
-		error_exit "Could not detect data volume. Please ensure you're running this in Recovery mode with a macOS installation present."
-	fi
-
-	echo "$system_vol|$data_vol"
 }
 
-# Detect volumes at startup
-volume_info=$(detect_volumes)
-system_volume=$(echo "$volume_info" | cut -d'|' -f1)
-data_volume=$(echo "$volume_info" | cut -d'|' -f2)
+volume_location_label() {
+	local volume_path="$1"
+	local internal_value
+
+	if is_external_volume "$volume_path"; then
+		printf 'External\n'
+		return
+	fi
+
+	internal_value=$(disk_info_value "$volume_path" Internal 2>/dev/null) || internal_value=""
+	case "$internal_value" in
+	true | yes | Yes | 1) printf 'Internal\n' ;;
+	*) printf 'Unknown\n' ;;
+	esac
+}
+
+list_system_volumes() {
+	local index=0
+	local volume_name
+	local location_label
+
+	info "Mounted macOS system volumes:"
+	while [ "$index" -lt "${#SYSTEM_VOLUME_CANDIDATES[@]}" ]; do
+		volume_name="${SYSTEM_VOLUME_CANDIDATES[$index]}"
+		location_label="${SYSTEM_VOLUME_LABELS[$index]}"
+		printf '  %d) %s [%s]\n' "$((index + 1))" "$volume_name" "$location_label"
+		index=$((index + 1))
+	done
+}
+
+use_arrow_menu() {
+	if [ "${BYPASS_MDM_FORCE_ARROW_MENU:-0}" = "1" ]; then
+		return 0
+	fi
+
+	[ -t 0 ] && [ "${TERM:-dumb}" != "dumb" ]
+}
+
+restore_terminal_cursor() {
+	printf '\033[?25h'
+}
+
+render_arrow_menu() {
+	local selected_index="$1"
+	local index=0
+
+	printf '\033[u\033[J'
+	printf 'Use Up/Down arrows to choose a macOS system volume, then press Enter.\n\n'
+	while [ "$index" -lt "${#SYSTEM_VOLUME_CANDIDATES[@]}" ]; do
+		if [ "$index" -eq "$selected_index" ]; then
+			printf ' \033[7m> %s [%s]\033[0m\n' "${SYSTEM_VOLUME_CANDIDATES[$index]}" "${SYSTEM_VOLUME_LABELS[$index]}"
+		else
+			printf '   %s [%s]\n' "${SYSTEM_VOLUME_CANDIDATES[$index]}" "${SYSTEM_VOLUME_LABELS[$index]}"
+		fi
+		index=$((index + 1))
+	done
+}
+
+prompt_with_arrow_menu() {
+	local selected_index=0
+	local key
+	local key_tail
+	local candidate_count="${#SYSTEM_VOLUME_CANDIDATES[@]}"
+
+	info "Mounted macOS system volumes:"
+	printf '\033[?25l\033[s'
+	trap 'restore_terminal_cursor; exit 130' INT TERM
+	trap 'restore_terminal_cursor' EXIT
+
+	while true; do
+		render_arrow_menu "$selected_index"
+		key=""
+		if ! IFS= read -r -s -n 1 key; then
+			restore_terminal_cursor
+			trap - INT TERM EXIT
+			error_exit "Could not read the system volume selection"
+		fi
+
+		case "$key" in
+		$'\033')
+			key_tail=""
+			if ! IFS= read -r -s -n 2 key_tail; then
+				continue
+			fi
+			case "$key_tail" in
+			"[A")
+				if [ "$selected_index" -eq 0 ]; then
+					selected_index=$((candidate_count - 1))
+				else
+					selected_index=$((selected_index - 1))
+				fi
+				;;
+			"[B") selected_index=$(((selected_index + 1) % candidate_count)) ;;
+			esac
+			;;
+		"")
+			requested_system_volume="${SYSTEM_VOLUME_CANDIDATES[$selected_index]}"
+			restore_terminal_cursor
+			trap - INT TERM EXIT
+			printf '\n'
+			return
+			;;
+		esac
+	done
+}
+
+prompt_with_numbered_menu() {
+	local selection
+	local selected_index
+
+	list_system_volumes
+	echo ""
+
+	while true; do
+		if ! read -r -p "Select the target macOS system volume [1-${#SYSTEM_VOLUME_CANDIDATES[@]}]: " selection; then
+			error_exit "Could not read the system volume selection"
+		fi
+
+		case "$selection" in
+		[1-9] | [1-9][0-9]*) ;;
+		*)
+			warn "Enter one of the listed numbers"
+			continue
+			;;
+		esac
+
+		if [ "$selection" -gt "${#SYSTEM_VOLUME_CANDIDATES[@]}" ]; then
+			warn "Selection must be between 1 and ${#SYSTEM_VOLUME_CANDIDATES[@]}"
+			continue
+		fi
+
+		selected_index=$((selection - 1))
+		requested_system_volume="${SYSTEM_VOLUME_CANDIDATES[$selected_index]}"
+		return
+	done
+}
+
+prompt_for_system_volume() {
+	discover_system_volumes
+
+	if use_arrow_menu; then
+		prompt_with_arrow_menu
+	else
+		prompt_with_numbered_menu
+	fi
+}
+
+find_matching_data_volume() {
+	local selected_system_path="$VOLUMES_ROOT/$requested_system_volume"
+	local system_group_id
+	local candidate_group_id
+	local candidate_path
+	local candidate_name
+	local matching_data_volume=""
+	local match_count=0
+
+	[ -d "$selected_system_path" ] || error_exit "System volume is not mounted: $selected_system_path"
+	system_group_id=$(disk_info_value "$selected_system_path" APFSVolumeGroupID) || error_exit "Could not read the APFS volume group for: $selected_system_path"
+
+	for candidate_path in "$VOLUMES_ROOT"/*; do
+		[ "$candidate_path" != "$selected_system_path" ] || continue
+		[ ! -L "$candidate_path" ] || continue
+		[ -d "$candidate_path/private/var/db/dslocal/nodes/Default" ] || continue
+		candidate_group_id=$(disk_info_value "$candidate_path" APFSVolumeGroupID) || continue
+		[ "$candidate_group_id" = "$system_group_id" ] || continue
+
+		candidate_name=$(basename "$candidate_path")
+		matching_data_volume="$candidate_name"
+		match_count=$((match_count + 1))
+	done
+
+	if [ "$match_count" -eq 0 ]; then
+		error_exit "Could not find a mounted Data volume matching system volume '$requested_system_volume'"
+	fi
+
+	if [ "$match_count" -gt 1 ]; then
+		error_exit "Multiple Data volumes match '$requested_system_volume'. Specify --data-volume explicitly."
+	fi
+
+	requested_data_volume="$matching_data_volume"
+}
+
+resolve_target_volumes() {
+	local validation_message
+
+	if [ -z "$requested_system_volume" ] && [ -n "$requested_data_volume" ]; then
+		case "$requested_data_volume" in
+		*" - Data") requested_system_volume="${requested_data_volume% - Data}" ;;
+		*) error_exit "Specify --system-volume when the data volume name does not end with ' - Data'" ;;
+		esac
+	fi
+
+	if [ -z "$requested_system_volume" ]; then
+		prompt_for_system_volume
+	fi
+
+	if ! validation_message=$(validate_volume_name "$requested_system_volume"); then
+		error_exit "Invalid system volume: $validation_message"
+	fi
+
+	if [ -z "$requested_data_volume" ]; then
+		find_matching_data_volume
+	fi
+
+	if ! validation_message=$(validate_volume_name "$requested_data_volume"); then
+		error_exit "Invalid data volume: $validation_message"
+	fi
+
+	if [ "$requested_system_volume" = "$requested_data_volume" ]; then
+		error_exit "System and data volumes must be different"
+	fi
+
+	system_volume="$requested_system_volume"
+	data_volume="$requested_data_volume"
+}
+
+is_external_volume() {
+	local internal_value
+	local external_device_value
+
+	internal_value=$(disk_info_value "$1" Internal) || return 1
+	case "$internal_value" in
+	false | no | No | 0) ;;
+	*) return 1 ;;
+	esac
+
+	external_device_value=$(disk_info_value "$1" RemovableMediaOrExternalDevice) || return 1
+	case "$external_device_value" in
+	true | yes | Yes | 1) return 0 ;;
+	*) return 1 ;;
+	esac
+}
+
+validate_target_volumes() {
+	local system_group_id
+	local data_group_id
+
+	system_path="$VOLUMES_ROOT/$system_volume"
+	data_path="$VOLUMES_ROOT/$data_volume"
+	dscl_path="$data_path/private/var/db/dslocal/nodes/Default"
+
+	[ -d "$system_path" ] || error_exit "System volume is not mounted: $system_path"
+	[ -d "$data_path" ] || error_exit "Data volume is not mounted: $data_path"
+	[ -d "$system_path/System/Library/CoreServices" ] || error_exit "Target does not look like a macOS system volume: $system_path"
+	[ -d "$dscl_path" ] || error_exit "Directory Services path does not exist: $dscl_path"
+
+	system_group_id=$(disk_info_value "$system_path" APFSVolumeGroupID) || error_exit "Could not read the APFS volume group for: $system_path"
+	data_group_id=$(disk_info_value "$data_path" APFSVolumeGroupID) || error_exit "Could not read the APFS volume group for: $data_path"
+
+	if [ -z "$system_group_id" ] || [ "$system_group_id" != "$data_group_id" ]; then
+		error_exit "Selected System and Data volumes are not in the same APFS volume group"
+	fi
+
+	if [ -n "$target_volume_group_id" ] && [ "$target_volume_group_id" != "$system_group_id" ]; then
+		error_exit "The selected APFS volume group changed while the script was running"
+	fi
+	target_volume_group_id="$system_group_id"
+
+	if [ "$require_external" = true ]; then
+		is_external_volume "$system_path" || error_exit "System volume is not reported as external: $system_path"
+		is_external_volume "$data_path" || error_exit "Data volume is not reported as external: $data_path"
+	fi
+}
+
+parse_arguments "$@"
+resolve_target_volumes
+validate_target_volumes
 
 # Display header
 echo ""
@@ -187,6 +508,15 @@ echo ""
 success "System Volume: $system_volume"
 success "Data Volume: $data_volume"
 echo ""
+
+if [ "$validate_only" = true ]; then
+	success "Target volume pair validated; no changes were made"
+	exit 0
+fi
+
+if [ "$(id -u)" -ne 0 ]; then
+	error_exit "Run this script as root from macOS Recovery"
+fi
 
 # Prompt user for choice
 PS3='Please enter your choice: '
@@ -200,22 +530,8 @@ select opt in "${options[@]}"; do
 		echo -e "${YEL}═══════════════════════════════════════${NC}"
 		echo ""
 
-		# Normalize data volume name if needed
-		if [ "$data_volume" != "Data" ]; then
-			info "Renaming data volume to 'Data' for consistency..."
-			if diskutil rename "$data_volume" "Data" 2>/dev/null; then
-				success "Data volume renamed successfully"
-				data_volume="Data"
-			else
-				warn "Could not rename data volume, continuing with: $data_volume"
-			fi
-		fi
-
 		# Validate critical paths
 		info "Validating system paths..."
-
-		system_path="/Volumes/$system_volume"
-		data_path="/Volumes/$data_volume"
 
 		if [ ! -d "$system_path" ]; then
 			error_exit "System volume path does not exist: $system_path"
@@ -225,7 +541,6 @@ select opt in "${options[@]}"; do
 			error_exit "Data volume path does not exist: $data_path"
 		fi
 
-		dscl_path="$data_path/private/var/db/dslocal/nodes/Default"
 		if [ ! -d "$dscl_path" ]; then
 			error_exit "Directory Services path does not exist: $dscl_path"
 		fi
@@ -293,6 +608,11 @@ select opt in "${options[@]}"; do
 			fi
 		done
 
+		echo ""
+
+		info "Revalidating target volume pair before writing..."
+		validate_target_volumes
+		success "Target volume pair is unchanged"
 		echo ""
 
 		# Find available UID

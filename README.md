@@ -10,7 +10,7 @@ A script to bypass Mobile Device Management (MDM) enrollment during macOS setup.
 
 ### What's New in v2:
 
-- **Automatic Volume Detection** - No longer requires specific volume names like "Macintosh HD"
+- **Interactive Volume Selection** - Uses an arrow-key menu for mounted system volumes and matches the APFS Data volume
 - **Comprehensive Error Handling** - Clear error messages and validation at every step
 - **Input Validation** - Validates usernames and passwords to prevent common mistakes
 - **UID Conflict Detection** - Automatically finds available UIDs to avoid conflicts
@@ -22,7 +22,8 @@ The instructions below use **v2 by default** (recommended). If you experience is
 
 ## ✨ Features
 
-- **🔍 Smart Volume Detection** - Automatically detects system and data volumes regardless of custom names
+- **🔍 Interactive Volume Selection** - Lists mounted System volumes with Internal/External labels; use Up/Down and Enter
+- **💽 External Drive Guard** - Can refuse to operate unless the selected macOS installation is on external media
 - **✅ Input Validation** - Validates usernames and passwords to prevent common errors
 - **🛡️ Comprehensive Error Handling** - Clear error messages guide you through any issues
 - **🎯 UID Conflict Resolution** - Automatically finds available user IDs to avoid conflicts
@@ -60,13 +61,53 @@ Follow these steps to bypass MDM enrollment during a fresh macOS installation:
 **5.** **Run the bypass script** - Copy and paste this command into Terminal:
 
 ```bash
-curl -L https://raw.githubusercontent.com/assafdori/bypass-mdm/main/bypass-mdm-v2.sh -o bypass-mdm.sh && chmod +x ./bypass-mdm.sh && ./bypass-mdm.sh
+curl -L https://raw.githubusercontent.com/prestige12138/bypass-mdm-external/main/bypass-mdm-v2.sh -o bypass-mdm.sh && chmod +x ./bypass-mdm.sh && ./bypass-mdm.sh --require-external
 ```
 
-**6.** **Volume Detection** - The script will automatically detect your volumes:
+**6.** **Volume Selection** - The script lists mounted macOS System volumes with Internal/External labels. Use the Up/Down arrow keys to move the highlight and press Enter. It then finds the Data volume in the same APFS Volume Group.
 
 - System Volume (e.g., "Macintosh HD", "MacOS", or your custom name)
 - Data Volume (e.g., "Data", "Macintosh HD - Data", or your custom name)
+
+### External macOS Installation: GoldenGate
+
+Run the downloaded script with `--require-external`. Move the highlight to `GoldenGate [External]` and press Enter:
+
+```text
+./bypass-mdm.sh --require-external
+
+ℹ Mounted macOS system volumes:
+Use Up/Down arrows to choose a macOS system volume, then press Enter.
+
+   Macintosh HD [Internal]
+ > GoldenGate [External]
+```
+
+The script uses the selected System volume and automatically matches `GoldenGate - Data` by APFS Volume Group ID. To check the selection without changing any files:
+
+```text
+./bypass-mdm.sh --require-external --validate-only
+
+Use Up/Down arrows to highlight GoldenGate, then press Enter.
+```
+
+When standard input is not an interactive terminal, the script automatically falls back to a numbered menu for automation compatibility.
+
+Command-line selection remains available for automation:
+
+```bash
+./bypass-mdm.sh --system-volume "GoldenGate" --require-external
+```
+
+The script checks that:
+
+- Both volumes are mounted under `/Volumes`
+- `GoldenGate` contains a macOS system installation
+- `GoldenGate - Data` contains the matching local Directory Services database
+- Both volumes have the same APFS Volume Group ID
+- Both volumes are reported as external media
+
+The Data volume is never renamed. If `GoldenGate - Data` is missing or unmounted, the script stops instead of falling back to the internal macOS installation. Mount it in Disk Utility first; if the volume does not exist, finish installing macOS on the external drive before running this script.
 
 **7.** **Select Option 1** - "Bypass MDM from Recovery"
 
@@ -76,7 +117,7 @@ curl -L https://raw.githubusercontent.com/assafdori/bypass-mdm/main/bypass-mdm-v
 - **Username**: Apple (default)
 - **Password**: 1234 (default)
 
-> 💡 **Tip:** The script validates your input and will prompt you to retry if there are issues
+> 💡 **Tip:** Password entry is intentionally visible, and the final completion message displays both the username and password.
 
 **9.** **Wait for Completion** - You'll see progress messages:
 
@@ -130,7 +171,7 @@ curl -L https://raw.githubusercontent.com/assafdori/bypass-mdm/main/bypass-mdm-v
 - Try the original version (legacy, hardcoded volume names):
 
 ```bash
-curl -L https://raw.githubusercontent.com/assafdori/bypass-mdm/main/bypass-mdm.sh -o bypass-mdm.sh && chmod +x ./bypass-mdm.sh && ./bypass-mdm.sh
+curl -L https://raw.githubusercontent.com/prestige12138/bypass-mdm-external/main/bypass-mdm.sh -o bypass-mdm.sh && chmod +x ./bypass-mdm.sh && ./bypass-mdm.sh
 ```
 
 ### Permission Errors
@@ -173,7 +214,7 @@ chmod +x bypass-mdm.sh
 
 | Version            | Description                                       | Status             |
 | ------------------ | ------------------------------------------------- | ------------------ |
-| `bypass-mdm-v2.sh` | Enhanced version with auto-detection & validation | ✅ **Recommended** |
+| `bypass-mdm-v2.sh` | Interactive target selection and APFS validation | ✅ **Recommended** |
 | `bypass-mdm.sh`    | Original version with hardcoded volume names      | ⚠️ Legacy          |
 
 ### ❤️ Optional Contributions
