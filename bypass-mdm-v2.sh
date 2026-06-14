@@ -12,6 +12,7 @@ NC='\033[0m'
 VOLUMES_ROOT="${VOLUMES_ROOT:-/Volumes}"
 DISKUTIL_BIN="${DISKUTIL_BIN:-diskutil}"
 PLISTBUDDY_BIN="${PLISTBUDDY_BIN:-/usr/libexec/PlistBuddy}"
+PLUTIL_BIN="${PLUTIL_BIN:-plutil}"
 
 requested_system_volume=""
 requested_data_volume=""
@@ -134,6 +135,76 @@ disk_info_value() {
 	printf '%s\n' "$value"
 }
 
+normalize_apfs_device_identifier() {
+	local device_identifier="$1"
+	local is_snapshot="$2"
+
+	if [ "$is_snapshot" = "true" ] || [ "$is_snapshot" = "yes" ] || [ "$is_snapshot" = "Yes" ] || [ "$is_snapshot" = "1" ]; then
+		device_identifier="${device_identifier%s[0-9]*}"
+	fi
+
+	printf '%s\n' "$device_identifier"
+}
+
+apfs_volume_role() {
+	local volume_path="$1"
+	local device_identifier
+	local is_snapshot
+	local plist_file
+	local container_count
+	local group_count
+	local volume_count
+	local container_index=0
+	local group_index
+	local volume_index
+	local plist_device
+	local plist_role
+
+	device_identifier=$(disk_info_value "$volume_path" DeviceIdentifier) || return 1
+	is_snapshot=$(disk_info_value "$volume_path" APFSSnapshot 2>/dev/null) || is_snapshot="false"
+	device_identifier=$(normalize_apfs_device_identifier "$device_identifier" "$is_snapshot")
+
+	plist_file=$(mktemp "${TMPDIR:-/tmp}/bypass-mdm-volume-groups.XXXXXX") || return 1
+	if ! "$DISKUTIL_BIN" apfs listVolumeGroups -plist >"$plist_file" 2>/dev/null; then
+		rm -f "$plist_file"
+		return 1
+	fi
+
+	container_count=$("$PLUTIL_BIN" -extract Containers raw -o - "$plist_file" 2>/dev/null) || {
+		rm -f "$plist_file"
+		return 1
+	}
+
+	while [ "$container_index" -lt "$container_count" ]; do
+		group_count=$("$PLUTIL_BIN" -extract "Containers.$container_index.VolumeGroups" raw -o - "$plist_file" 2>/dev/null) || group_count=0
+		group_index=0
+		while [ "$group_index" -lt "$group_count" ]; do
+			volume_count=$("$PLUTIL_BIN" -extract "Containers.$container_index.VolumeGroups.$group_index.Volumes" raw -o - "$plist_file" 2>/dev/null) || volume_count=0
+			volume_index=0
+			while [ "$volume_index" -lt "$volume_count" ]; do
+				plist_device=$("$PLUTIL_BIN" -extract "Containers.$container_index.VolumeGroups.$group_index.Volumes.$volume_index.DeviceIdentifier" raw -o - "$plist_file" 2>/dev/null) || plist_device=""
+				if [ "$plist_device" = "$device_identifier" ]; then
+					plist_role=$("$PLUTIL_BIN" -extract "Containers.$container_index.VolumeGroups.$group_index.Volumes.$volume_index.Role" raw -o - "$plist_file" 2>/dev/null) || plist_role=""
+					rm -f "$plist_file"
+					printf '%s\n' "$plist_role"
+					[ -n "$plist_role" ]
+					return
+				fi
+				volume_index=$((volume_index + 1))
+			done
+			group_index=$((group_index + 1))
+		done
+		container_index=$((container_index + 1))
+	done
+
+	rm -f "$plist_file"
+	return 1
+}
+
+is_apfs_system_volume() {
+	[ "$(apfs_volume_role "$1" 2>/dev/null)" = "System" ]
+}
+
 # Validation function for username
 validate_username() {
 	local username="$1"
@@ -222,6 +293,7 @@ discover_system_volumes() {
 	for volume_path in "$VOLUMES_ROOT"/*; do
 		[ ! -L "$volume_path" ] || continue
 		[ -d "$volume_path/System/Library/CoreServices" ] || continue
+		is_apfs_system_volume "$volume_path" || continue
 		SYSTEM_VOLUME_CANDIDATES+=("$(basename "$volume_path")")
 		SYSTEM_VOLUME_LABELS+=("$(volume_location_label "$volume_path")")
 	done
@@ -394,6 +466,7 @@ find_matching_data_volume() {
 		[ "$candidate_path" != "$selected_system_path" ] || continue
 		[ ! -L "$candidate_path" ] || continue
 		[ -d "$candidate_path/private/var/db/dslocal/nodes/Default" ] || continue
+		[ "$(apfs_volume_role "$candidate_path" 2>/dev/null)" = "Data" ] || continue
 		candidate_group_id=$(disk_info_value "$candidate_path" APFSVolumeGroupID) || continue
 		[ "$candidate_group_id" = "$system_group_id" ] || continue
 
@@ -467,6 +540,8 @@ is_external_volume() {
 validate_target_volumes() {
 	local system_group_id
 	local data_group_id
+	local system_role
+	local data_role
 
 	system_path="$VOLUMES_ROOT/$system_volume"
 	data_path="$VOLUMES_ROOT/$data_volume"
@@ -476,6 +551,11 @@ validate_target_volumes() {
 	[ -d "$data_path" ] || error_exit "Data volume is not mounted: $data_path"
 	[ -d "$system_path/System/Library/CoreServices" ] || error_exit "Target does not look like a macOS system volume: $system_path"
 	[ -d "$dscl_path" ] || error_exit "Directory Services path does not exist: $dscl_path"
+
+	system_role=$(apfs_volume_role "$system_path") || error_exit "Could not read the APFS role for: $system_path"
+	data_role=$(apfs_volume_role "$data_path") || error_exit "Could not read the APFS role for: $data_path"
+	[ "$system_role" = "System" ] || error_exit "Selected system volume does not have the APFS System role: $system_path"
+	[ "$data_role" = "Data" ] || error_exit "Selected data volume does not have the APFS Data role: $data_path"
 
 	system_group_id=$(disk_info_value "$system_path" APFSVolumeGroupID) || error_exit "Could not read the APFS volume group for: $system_path"
 	data_group_id=$(disk_info_value "$data_path" APFSVolumeGroupID) || error_exit "Could not read the APFS volume group for: $data_path"

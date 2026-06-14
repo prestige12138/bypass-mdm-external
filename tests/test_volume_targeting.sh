@@ -45,6 +45,7 @@ make_fixture() {
 	mkdir -p \
 		"$volumes_root/GoldenGate/System/Library/CoreServices" \
 		"$volumes_root/GoldenGate/private/var/db/dslocal/nodes/Default" \
+		"$volumes_root/GoldenGate - Data/System/Library/CoreServices" \
 		"$volumes_root/GoldenGate - Data/private/var/db/dslocal/nodes/Default" \
 		"$volumes_root/GoldenGate - Data/Users" \
 		"$mock_bin"
@@ -53,6 +54,60 @@ make_fixture() {
 #!/bin/bash
 
 printf '%s\n' "$*" >>"$DISKUTIL_LOG"
+
+if [ "$1" = "apfs" ] && [ "$2" = "listVolumeGroups" ] && [ "$3" = "-plist" ]; then
+	cat <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Containers</key>
+	<array>
+		<dict>
+			<key>VolumeGroups</key>
+			<array>
+				<dict>
+					<key>Volumes</key>
+					<array>
+						<dict>
+							<key>DeviceIdentifier</key>
+							<string>disk8s1</string>
+							<key>Role</key>
+							<string>Data</string>
+						</dict>
+						<dict>
+							<key>DeviceIdentifier</key>
+							<string>disk8s2</string>
+							<key>Role</key>
+							<string>System</string>
+						</dict>
+					</array>
+				</dict>
+				<dict>
+					<key>Volumes</key>
+					<array>
+						<dict>
+							<key>DeviceIdentifier</key>
+							<string>disk9s1</string>
+							<key>Role</key>
+							<string>Data</string>
+						</dict>
+						<dict>
+							<key>DeviceIdentifier</key>
+							<string>disk9s2</string>
+							<key>Role</key>
+							<string>System</string>
+						</dict>
+					</array>
+				</dict>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>
+PLIST
+	exit 0
+fi
 
 if [ "$1" != "info" ] || [ "$2" != "-plist" ]; then
 	exit 64
@@ -64,24 +119,28 @@ case "$3" in
 	internal="true"
 	external_device="false"
 	volume_name="AlphaMac - Data"
+	device_identifier="disk8s1"
 	;;
 *"AlphaMac")
 	group_id="OTHER-MAC-GROUP"
 	internal="true"
 	external_device="false"
 	volume_name="AlphaMac"
+	device_identifier="disk8s2"
 	;;
 *"GoldenGate - Data")
 	group_id="${DATA_GROUP_ID:-EXTERNAL-GROUP}"
 	internal="${DATA_INTERNAL:-false}"
 	external_device="${DATA_EXTERNAL_DEVICE:-true}"
 	volume_name="GoldenGate - Data"
+	device_identifier="disk9s1"
 	;;
 *"GoldenGate")
 	group_id="${SYSTEM_GROUP_ID:-EXTERNAL-GROUP}"
 	internal="${SYSTEM_INTERNAL:-false}"
 	external_device="${SYSTEM_EXTERNAL_DEVICE:-true}"
 	volume_name="GoldenGate"
+	device_identifier="disk9s2"
 	;;
 *)
 	exit 1
@@ -101,6 +160,10 @@ cat <<PLIST
 	<$external_device/>
 	<key>VolumeName</key>
 	<string>$volume_name</string>
+	<key>DeviceIdentifier</key>
+	<string>$device_identifier</string>
+	<key>APFSSnapshot</key>
+	<false/>
 </dict>
 </plist>
 PLIST
@@ -159,6 +222,9 @@ test_interactive_system_volume_selection() {
 	if [ "$status" -eq 0 ]; then
 		printf '%s\n' "$output" | grep -Fq '1) AlphaMac [Internal]' || status=1
 		printf '%s\n' "$output" | grep -Fq '2) GoldenGate [External]' || status=1
+		if printf '%s\n' "$output" | grep -Fq 'GoldenGate - Data [External]'; then
+			status=1
+		fi
 	fi
 	remove_fixture
 	return "$status"
@@ -253,6 +319,17 @@ test_mismatched_volume_groups() {
 	return "$status"
 }
 
+test_rejects_data_volume_as_system() {
+	make_fixture
+	run_script \
+		--system-volume "GoldenGate - Data" \
+		--data-volume "GoldenGate" \
+		--validate-only
+	local status=$?
+	remove_fixture
+	return "$status"
+}
+
 test_missing_data_volume() {
 	make_fixture
 	rm -rf "$volumes_root/GoldenGate - Data"
@@ -319,6 +396,7 @@ assert_success "re-prompts after an invalid system-volume menu choice" test_inva
 assert_success "accepts an explicit external APFS volume pair" test_explicit_external_pair
 assert_success "matches the data volume when only the system name is provided" test_system_name_matches_data_volume
 assert_failure "rejects volumes from different APFS volume groups" test_mismatched_volume_groups
+assert_failure "rejects an APFS Data volume selected as the system volume" test_rejects_data_volume_as_system
 assert_failure "rejects an unmounted or missing data volume" test_missing_data_volume
 assert_failure "rejects an internal target when external media is required" test_rejects_internal_target
 assert_failure "rejects volume names containing path traversal" test_rejects_path_traversal

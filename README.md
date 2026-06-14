@@ -77,7 +77,7 @@ The script can target macOS installed on an external drive without modifying the
 curl -fL https://raw.githubusercontent.com/prestige12138/bypass-mdm-external/main/bypass-mdm-v2.sh -o bypass-mdm.sh && chmod +x bypass-mdm.sh && ./bypass-mdm.sh --require-external
 ```
 
-Use the Up/Down arrow keys to select the external System volume, then press Enter:
+Only volumes with the APFS System role are listed. Data volumes are matched automatically and cannot be selected. Use the Up/Down arrow keys to select the external System volume, then press Enter:
 
 ```text
    Macintosh HD [Internal]
