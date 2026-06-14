@@ -23,6 +23,7 @@ The instructions below use **v2 by default** (recommended). If you experience is
 ## ✨ Features
 
 - **🔍 Interactive Volume Selection** - Lists mounted System volumes with Internal/External labels; use Up/Down and Enter
+- **⌨️ Consistent Menus** - All fixed choices use Up/Down and Enter; text is only required for account details
 - **💽 External Drive Guard** - Can refuse to operate unless the selected macOS installation is on external media
 - **✅ Input Validation** - Validates usernames and passwords to prevent common errors
 - **🛡️ Comprehensive Error Handling** - Clear error messages guide you through any issues

@@ -389,6 +389,37 @@ test_password_is_visible() {
 		grep -Fq 'and password: ${YEL}$passw${NC}' "$SCRIPT"
 }
 
+test_all_discrete_choices_use_shared_menu() {
+	grep -Fq 'choose_menu_option "Choose an action"' "$SCRIPT" &&
+		grep -Fq 'choose_menu_option "User already exists"' "$SCRIPT" &&
+		! grep -Fq 'select opt in' "$SCRIPT" &&
+		! grep -Fq 'Do you want to use a different username? (y/n)' "$SCRIPT"
+}
+
+test_shared_arrow_menu_returns_selected_option() {
+	local input_file
+	local output_file
+	local helpers_file
+	local status=0
+
+	# Load function definitions without running the script entry point.
+	helpers_file=$(mktemp "${TMPDIR:-/tmp}/bypass-mdm-menu-helpers.XXXXXX")
+	awk '$0 == "parse_arguments \"$@\"" {exit} {print}' "$SCRIPT" >"$helpers_file"
+	source "$helpers_file"
+	input_file=$(mktemp "${TMPDIR:-/tmp}/bypass-mdm-menu-input.XXXXXX")
+	output_file=$(mktemp "${TMPDIR:-/tmp}/bypass-mdm-menu-output.XXXXXX")
+	printf '\033[B\n' >"$input_file"
+
+	BYPASS_MDM_FORCE_ARROW_MENU=1
+	choose_menu_option "Test menu" "Choose an option." "First option" "Second option" <"$input_file" >"$output_file" || status=1
+	[ "$SELECTED_MENU_INDEX" -eq 1 ] || status=1
+	grep -Fq 'First option' "$output_file" || status=1
+	grep -Fq 'Second option' "$output_file" || status=1
+
+	rm -f "$input_file" "$output_file" "$helpers_file"
+	return "$status"
+}
+
 assert_success "selects a system volume interactively and matches its data volume" test_interactive_system_volume_selection
 assert_success "supports down-arrow and Enter system-volume selection" test_arrow_key_system_volume_selection
 assert_success "automatically uses the arrow menu on a real TTY" test_real_tty_uses_arrow_menu
@@ -402,6 +433,8 @@ assert_failure "rejects an internal target when external media is required" test
 assert_failure "rejects volume names containing path traversal" test_rejects_path_traversal
 assert_success "does not rename the selected data volume" test_never_renames_volume
 assert_success "shows password input and prints the password after completion" test_password_is_visible
+assert_success "uses the shared interactive menu for all discrete choices" test_all_discrete_choices_use_shared_menu
+assert_success "shared arrow menu returns the selected option" test_shared_arrow_menu_returns_selected_option
 
 if [ "$failures" -ne 0 ]; then
 	printf '\n%d test(s) failed\n' "$failures" >&2

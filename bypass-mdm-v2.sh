@@ -21,6 +21,8 @@ validate_only=false
 target_volume_group_id=""
 SYSTEM_VOLUME_CANDIDATES=()
 SYSTEM_VOLUME_LABELS=()
+MENU_OPTIONS=()
+SELECTED_MENU_INDEX=0
 
 # Error handling function
 error_exit() {
@@ -319,20 +321,6 @@ volume_location_label() {
 	esac
 }
 
-list_system_volumes() {
-	local index=0
-	local volume_name
-	local location_label
-
-	info "Mounted macOS system volumes:"
-	while [ "$index" -lt "${#SYSTEM_VOLUME_CANDIDATES[@]}" ]; do
-		volume_name="${SYSTEM_VOLUME_CANDIDATES[$index]}"
-		location_label="${SYSTEM_VOLUME_LABELS[$index]}"
-		printf '  %d) %s [%s]\n' "$((index + 1))" "$volume_name" "$location_label"
-		index=$((index + 1))
-	done
-}
-
 use_arrow_menu() {
 	if [ "${BYPASS_MDM_FORCE_ARROW_MENU:-0}" = "1" ]; then
 		return 0
@@ -347,38 +335,42 @@ restore_terminal_cursor() {
 
 render_arrow_menu() {
 	local selected_index="$1"
+	local title="$2"
+	local instruction="$3"
 	local index=0
 
 	printf '\033[u\033[J'
-	printf 'Use Up/Down arrows to choose a macOS system volume, then press Enter.\n\n'
-	while [ "$index" -lt "${#SYSTEM_VOLUME_CANDIDATES[@]}" ]; do
+	printf '%s\n' "$title"
+	printf '%s\n\n' "$instruction"
+	while [ "$index" -lt "${#MENU_OPTIONS[@]}" ]; do
 		if [ "$index" -eq "$selected_index" ]; then
-			printf ' \033[7m> %s [%s]\033[0m\n' "${SYSTEM_VOLUME_CANDIDATES[$index]}" "${SYSTEM_VOLUME_LABELS[$index]}"
+			printf ' \033[7m> %s\033[0m\n' "${MENU_OPTIONS[$index]}"
 		else
-			printf '   %s [%s]\n' "${SYSTEM_VOLUME_CANDIDATES[$index]}" "${SYSTEM_VOLUME_LABELS[$index]}"
+			printf '   %s\n' "${MENU_OPTIONS[$index]}"
 		fi
 		index=$((index + 1))
 	done
 }
 
-prompt_with_arrow_menu() {
+choose_with_arrow_menu() {
+	local title="$1"
+	local instruction="$2"
 	local selected_index=0
 	local key
 	local key_tail
-	local candidate_count="${#SYSTEM_VOLUME_CANDIDATES[@]}"
+	local option_count="${#MENU_OPTIONS[@]}"
 
-	info "Mounted macOS system volumes:"
 	printf '\033[?25l\033[s'
 	trap 'restore_terminal_cursor; exit 130' INT TERM
 	trap 'restore_terminal_cursor' EXIT
 
 	while true; do
-		render_arrow_menu "$selected_index"
+		render_arrow_menu "$selected_index" "$title" "$instruction"
 		key=""
 		if ! IFS= read -r -s -n 1 key; then
 			restore_terminal_cursor
 			trap - INT TERM EXIT
-			error_exit "Could not read the system volume selection"
+			error_exit "Could not read the menu selection"
 		fi
 
 		case "$key" in
@@ -390,16 +382,16 @@ prompt_with_arrow_menu() {
 			case "$key_tail" in
 			"[A")
 				if [ "$selected_index" -eq 0 ]; then
-					selected_index=$((candidate_count - 1))
+					selected_index=$((option_count - 1))
 				else
 					selected_index=$((selected_index - 1))
 				fi
 				;;
-			"[B") selected_index=$(((selected_index + 1) % candidate_count)) ;;
+			"[B") selected_index=$(((selected_index + 1) % option_count)) ;;
 			esac
 			;;
 		"")
-			requested_system_volume="${SYSTEM_VOLUME_CANDIDATES[$selected_index]}"
+			SELECTED_MENU_INDEX="$selected_index"
 			restore_terminal_cursor
 			trap - INT TERM EXIT
 			printf '\n'
@@ -409,16 +401,22 @@ prompt_with_arrow_menu() {
 	done
 }
 
-prompt_with_numbered_menu() {
+choose_with_numbered_menu() {
+	local title="$1"
 	local selection
 	local selected_index
+	local index=0
 
-	list_system_volumes
+	printf '%s\n' "$title"
+	while [ "$index" -lt "${#MENU_OPTIONS[@]}" ]; do
+		printf '  %d) %s\n' "$((index + 1))" "${MENU_OPTIONS[$index]}"
+		index=$((index + 1))
+	done
 	echo ""
 
 	while true; do
-		if ! read -r -p "Select the target macOS system volume [1-${#SYSTEM_VOLUME_CANDIDATES[@]}]: " selection; then
-			error_exit "Could not read the system volume selection"
+		if ! read -r -p "Select an option [1-${#MENU_OPTIONS[@]}]: " selection; then
+			error_exit "Could not read the menu selection"
 		fi
 
 		case "$selection" in
@@ -429,25 +427,47 @@ prompt_with_numbered_menu() {
 			;;
 		esac
 
-		if [ "$selection" -gt "${#SYSTEM_VOLUME_CANDIDATES[@]}" ]; then
-			warn "Selection must be between 1 and ${#SYSTEM_VOLUME_CANDIDATES[@]}"
+		if [ "$selection" -gt "${#MENU_OPTIONS[@]}" ]; then
+			warn "Selection must be between 1 and ${#MENU_OPTIONS[@]}"
 			continue
 		fi
 
 		selected_index=$((selection - 1))
-		requested_system_volume="${SYSTEM_VOLUME_CANDIDATES[$selected_index]}"
+		SELECTED_MENU_INDEX="$selected_index"
 		return
 	done
 }
 
-prompt_for_system_volume() {
-	discover_system_volumes
+choose_menu_option() {
+	local title="$1"
+	local instruction="$2"
+	shift 2
+
+	MENU_OPTIONS=("$@")
+	[ "${#MENU_OPTIONS[@]}" -gt 0 ] || error_exit "Menu has no options"
 
 	if use_arrow_menu; then
-		prompt_with_arrow_menu
+		choose_with_arrow_menu "$title" "$instruction"
 	else
-		prompt_with_numbered_menu
+		choose_with_numbered_menu "$title"
 	fi
+}
+
+prompt_for_system_volume() {
+	local index=0
+	local menu_entries=()
+
+	discover_system_volumes
+	while [ "$index" -lt "${#SYSTEM_VOLUME_CANDIDATES[@]}" ]; do
+		menu_entries+=("${SYSTEM_VOLUME_CANDIDATES[$index]} [${SYSTEM_VOLUME_LABELS[$index]}]")
+		index=$((index + 1))
+	done
+
+	choose_menu_option \
+		"Mounted macOS system volumes:" \
+		"Use Up/Down arrows to choose a macOS system volume, then press Enter." \
+		"${menu_entries[@]}"
+	requested_system_volume="${SYSTEM_VOLUME_CANDIDATES[$SELECTED_MENU_INDEX]}"
 }
 
 find_matching_data_volume() {
@@ -599,11 +619,12 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 # Prompt user for choice
-PS3='Please enter your choice: '
-options=("Bypass MDM from Recovery" "Reboot & Exit")
-select opt in "${options[@]}"; do
-	case $opt in
-	"Bypass MDM from Recovery")
+choose_menu_option "Choose an action" "Use Up/Down arrows, then press Enter." \
+	"Bypass MDM from Recovery" \
+	"Reboot & Exit"
+
+case "$SELECTED_MENU_INDEX" in
+0)
 		echo ""
 		echo -e "${YEL}═══════════════════════════════════════${NC}"
 		echo -e "${YEL}  Starting MDM Bypass Process${NC}"
@@ -652,8 +673,10 @@ select opt in "${options[@]}"; do
 		# Check if user already exists
 		if check_user_exists "$dscl_path" "$username"; then
 			warn "User '$username' already exists in the system"
-			read -p "Do you want to use a different username? (y/n): " response
-			if [[ "$response" =~ ^[Yy]$ ]]; then
+			choose_menu_option "User already exists" "Choose how to continue." \
+				"Use a different username" \
+				"Continue with the existing username"
+			if [ "$SELECTED_MENU_INDEX" -eq 0 ]; then
 				while true; do
 					read -p "Enter a different username: " username
 					if [ -z "$username" ]; then
@@ -794,16 +817,10 @@ select opt in "${options[@]}"; do
 		echo -e "  2. Reboot your Mac"
 		echo -e "  3. Login with username: ${YEL}$username${NC} and password: ${YEL}$passw${NC}"
 		echo ""
-		break
 		;;
-	"Reboot & Exit")
+1)
 		echo ""
 		info "Rebooting system..."
 		reboot
-		break
 		;;
-	*)
-		echo -e "${RED}Invalid option $REPLY${NC}"
-		;;
-	esac
-done
+esac
