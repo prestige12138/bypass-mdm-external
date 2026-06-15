@@ -18,6 +18,7 @@ requested_system_volume=""
 requested_data_volume=""
 require_external=false
 validate_only=false
+demo_mode=false
 target_volume_group_id=""
 SYSTEM_VOLUME_CANDIDATES=()
 SYSTEM_VOLUME_LABELS=()
@@ -56,6 +57,7 @@ Options:
   --data-volume NAME    Target macOS data volume name
   --require-external    Refuse to operate unless both volumes are external
   --validate-only       Validate the target without changing any files
+  --demo                Preview the complete UI with simulated data and no system access
   -h, --help            Show this help
 
 Example:
@@ -105,6 +107,10 @@ parse_arguments() {
 			validate_only=true
 			shift
 			;;
+		--demo)
+			demo_mode=true
+			shift
+			;;
 		-h | --help)
 			usage
 			exit 0
@@ -114,6 +120,10 @@ parse_arguments() {
 			;;
 		esac
 	done
+
+	if [ "$demo_mode" = true ] && { [ -n "$requested_system_volume" ] || [ -n "$requested_data_volume" ] || [ "$validate_only" = true ]; }; then
+		error_exit "--demo cannot be combined with --system-volume, --data-volume, or --validate-only"
+	fi
 }
 
 disk_info_value() {
@@ -264,6 +274,10 @@ check_user_exists() {
 	local dscl_path="$1"
 	local username="$2"
 
+	if [ "$demo_mode" = true ]; then
+		return 1
+	fi
+
 	if dscl -f "$dscl_path" localhost -read "/Local/Default/Users/$username" 2>/dev/null; then
 		return 0 # User exists
 	else
@@ -275,6 +289,11 @@ check_user_exists() {
 find_available_uid() {
 	local dscl_path="$1"
 	local uid=501
+
+	if [ "$demo_mode" = true ]; then
+		echo "501"
+		return 0
+	fi
 
 	# Check UIDs from 501-599
 	while [ $uid -lt 600 ]; do
@@ -294,6 +313,16 @@ discover_system_volumes() {
 
 	SYSTEM_VOLUME_CANDIDATES=()
 	SYSTEM_VOLUME_LABELS=()
+	if [ "$demo_mode" = true ]; then
+		if [ "$require_external" != true ]; then
+			SYSTEM_VOLUME_CANDIDATES+=("Macintosh HD")
+			SYSTEM_VOLUME_LABELS+=("Internal")
+		fi
+		SYSTEM_VOLUME_CANDIDATES+=("GoldenGate")
+		SYSTEM_VOLUME_LABELS+=("External")
+		return
+	fi
+
 	for volume_path in "$VOLUMES_ROOT"/*; do
 		[ ! -L "$volume_path" ] || continue
 		[ -d "$volume_path/System/Library/CoreServices" ] || continue
@@ -310,6 +339,14 @@ discover_system_volumes() {
 volume_location_label() {
 	local volume_path="$1"
 	local internal_value
+
+	if [ "$demo_mode" = true ]; then
+		case "$volume_path" in
+		*GoldenGate) printf 'External\n' ;;
+		*) printf 'Internal\n' ;;
+		esac
+		return
+	fi
 
 	if is_external_volume "$volume_path"; then
 		printf 'External\n'
@@ -513,6 +550,15 @@ find_matching_data_volume() {
 	local matching_data_volume=""
 	local match_count=0
 
+	if [ "$demo_mode" = true ]; then
+		case "$requested_system_volume" in
+		"Macintosh HD") requested_data_volume="Macintosh HD - Data" ;;
+		"GoldenGate") requested_data_volume="GoldenGate - Data" ;;
+		*) error_exit "Unknown simulated System volume: $requested_system_volume" ;;
+		esac
+		return
+	fi
+
 	[ -d "$selected_system_path" ] || error_exit "System volume is not mounted: $selected_system_path"
 	system_group_id=$(disk_info_value "$selected_system_path" APFSVolumeGroupID) || error_exit "Could not read the APFS volume group for: $selected_system_path"
 
@@ -601,6 +647,18 @@ validate_target_volumes() {
 	data_path="$VOLUMES_ROOT/$data_volume"
 	dscl_path="$data_path/private/var/db/dslocal/nodes/Default"
 
+	if [ "$demo_mode" = true ]; then
+		case "$system_volume" in
+		"Macintosh HD")
+			[ "$require_external" != true ] || error_exit "The simulated internal volume is unavailable with --require-external"
+			target_volume_group_id="DEMO-INTERNAL-GROUP"
+			;;
+		"GoldenGate") target_volume_group_id="DEMO-EXTERNAL-GROUP" ;;
+		*) error_exit "Unknown simulated System volume: $system_volume" ;;
+		esac
+		return
+	fi
+
 	[ -d "$system_path" ] || error_exit "System volume is not mounted: $system_path"
 	[ -d "$data_path" ] || error_exit "Data volume is not mounted: $data_path"
 	[ -d "$system_path/System/Library/CoreServices" ] || error_exit "Target does not look like a macOS system volume: $system_path"
@@ -646,6 +704,10 @@ display_selected_target() {
 	echo -e "${CYAN}║  Bypass MDM By Assaf Dori (assafdori.com)   ║${NC}"
 	echo -e "${CYAN}╚═══════════════════════════════════════════════╝${NC}"
 	echo ""
+	if [ "$demo_mode" = true ]; then
+		echo -e "${PUR}DEMO MODE - NO CHANGES WILL BE MADE${NC}"
+		echo ""
+	fi
 	success "System Volume: $system_volume"
 	success "Data Volume: $data_volume"
 	echo ""
@@ -716,16 +778,21 @@ prepare_available_uid() {
 print_confirmation_summary() {
 	local location_label
 	local account_status="New account"
+	local action_label="Bypass MDM from Recovery"
 
 	location_label=$(volume_location_label "$system_path")
 	if check_user_exists "$dscl_path" "$username"; then
 		account_status="Existing account will be updated"
 	fi
+	if [ "$demo_mode" = true ]; then
+		action_label="Demo Preview Only"
+		account_status="Simulated new account"
+	fi
 
 	echo ""
 	echo -e "${CYAN}════════════ Final Confirmation ════════════${NC}"
 	echo ""
-	echo "Action: Bypass MDM from Recovery"
+	echo "Action: $action_label"
 	echo "System Volume: $system_volume"
 	echo "System Path: $system_path"
 	echo "Data Volume: $data_volume"
@@ -751,7 +818,11 @@ print_confirmation_summary() {
 	echo "  - Mark Setup Assistant as complete"
 	echo "  - Update local cloud configuration markers"
 	echo ""
-	warn "After confirmation, these changes cannot be taken back by this wizard."
+	if [ "$demo_mode" = true ]; then
+		info "Demo confirmation only; no commands or file changes will run."
+	else
+		warn "After confirmation, these changes cannot be taken back by this wizard."
+	fi
 	echo ""
 }
 
@@ -874,6 +945,22 @@ execute_bypass() {
 	echo ""
 }
 
+execute_demo() {
+	echo ""
+	echo -e "${PUR}═════════════════════════════════════${NC}"
+	echo -e "${PUR}  Demo Execution Preview${NC}"
+	echo -e "${PUR}═════════════════════════════════════${NC}"
+	echo ""
+	info "Would create or update administrator account: $username"
+	info "Would create home directory: $data_path/Users/$username"
+	info "Would update MDM enrollment entries on: $system_volume"
+	info "Would update setup and cloud configuration markers"
+	echo ""
+	success "Demo completed; no changes were made."
+	echo -e "Login preview - username: ${YEL}$username${NC}, password: ${YEL}$passw${NC}"
+	echo ""
+}
+
 run_bypass_wizard() {
 	local confirmation_status
 
@@ -886,7 +973,11 @@ run_bypass_wizard() {
 		confirmation_status=$?
 		case "$confirmation_status" in
 		0)
-			execute_bypass
+			if [ "$demo_mode" = true ]; then
+				execute_demo
+			else
+				execute_bypass
+			fi
 			return 0
 			;;
 		10) continue ;;
@@ -899,6 +990,12 @@ run_bypass_wizard() {
 
 parse_arguments "$@"
 
+if [ "$demo_mode" = true ]; then
+	echo -e "${PUR}DEMO MODE - NO CHANGES WILL BE MADE${NC}"
+	echo "All volumes, accounts, IDs, and operations shown below are simulated."
+	echo ""
+fi
+
 while true; do
 	resolve_target_volumes
 	validate_target_volumes
@@ -909,7 +1006,7 @@ while true; do
 		exit 0
 	fi
 
-	if [ "$(id -u)" -ne 0 ]; then
+	if [ "$demo_mode" != true ] && [ "$(id -u)" -ne 0 ]; then
 		error_exit "Run this script as root from macOS Recovery"
 	fi
 
@@ -948,8 +1045,12 @@ while true; do
 			if [ $? -eq 2 ]; then
 				continue
 			fi
-			info "Rebooting system..."
-			reboot
+			if [ "$demo_mode" = true ]; then
+				info "Demo reboot selected; no reboot was performed."
+			else
+				info "Rebooting system..."
+				reboot
+			fi
 			exit 0
 			;;
 		2)

@@ -486,6 +486,59 @@ test_writes_are_gated_by_final_confirmation() {
 		grep -Fq 'info "Changes are now being written and can no longer be taken back."' "$SCRIPT"
 }
 
+test_demo_mode_previews_full_ui_without_system_access() {
+	local demo_dir
+	local demo_bin
+	local forbidden_log
+	local output_file
+	local reboot_output_file
+	local command_name
+	local status=0
+
+	demo_dir=$(mktemp -d "${TMPDIR:-/tmp}/bypass-mdm-demo.XXXXXX")
+	demo_bin="$demo_dir/bin"
+	forbidden_log="$demo_dir/forbidden.log"
+	output_file="$demo_dir/output.log"
+	reboot_output_file="$demo_dir/reboot-output.log"
+	mkdir -p "$demo_bin"
+	: >"$forbidden_log"
+
+	for command_name in diskutil dscl id reboot mkdir touch rm; do
+		cat >"$demo_bin/$command_name" <<'EOF'
+#!/bin/bash
+printf '%s %s\n' "$(basename "$0")" "$*" >>"$DEMO_FORBIDDEN_LOG"
+exit 91
+EOF
+		chmod +x "$demo_bin/$command_name"
+	done
+
+	printf '2\n1\n\n\n\n1\n' | env \
+		PATH="$demo_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+		DEMO_FORBIDDEN_LOG="$forbidden_log" \
+		DISKUTIL_BIN="$demo_bin/diskutil" \
+		/bin/bash "$SCRIPT" --demo >"$output_file" 2>&1 || status=1
+
+	grep -Fq 'DEMO MODE - NO CHANGES WILL BE MADE' "$output_file" || status=1
+	grep -Fq '1) Macintosh HD [Internal]' "$output_file" || status=1
+	grep -Fq '2) GoldenGate [External]' "$output_file" || status=1
+	grep -Fq 'System Volume: GoldenGate' "$output_file" || status=1
+	grep -Fq 'Data Volume: GoldenGate - Data' "$output_file" || status=1
+	grep -Fq 'Password: 1234' "$output_file" || status=1
+	grep -Fq 'Demo completed; no changes were made.' "$output_file" || status=1
+	[ ! -s "$forbidden_log" ] || status=1
+
+	printf '2\n2\n1\n' | env \
+		PATH="$demo_bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+		DEMO_FORBIDDEN_LOG="$forbidden_log" \
+		DISKUTIL_BIN="$demo_bin/diskutil" \
+		/bin/bash "$SCRIPT" --demo >"$reboot_output_file" 2>&1 || status=1
+	grep -Fq 'Demo reboot selected; no reboot was performed.' "$reboot_output_file" || status=1
+	[ ! -s "$forbidden_log" ] || status=1
+
+	/bin/rm -rf "$demo_dir"
+	return "$status"
+}
+
 assert_success "selects a system volume interactively and matches its data volume" test_interactive_system_volume_selection
 assert_success "supports down-arrow and Enter system-volume selection" test_arrow_key_system_volume_selection
 assert_success "automatically uses the arrow menu on a real TTY" test_real_tty_uses_arrow_menu
@@ -504,6 +557,7 @@ assert_success "shared arrow menu returns the selected option" test_shared_arrow
 assert_success "Escape returns to the previous menu step" test_escape_returns_to_previous_step
 assert_success "confirmation summary lists target, account, UID, and plaintext password" test_confirmation_summary_lists_all_information
 assert_success "disk writes are gated by final confirmation" test_writes_are_gated_by_final_confirmation
+assert_success "demo mode previews the full UI without system access" test_demo_mode_previews_full_ui_without_system_access
 
 if [ "$failures" -ne 0 ]; then
 	printf '\n%d test(s) failed\n' "$failures" >&2

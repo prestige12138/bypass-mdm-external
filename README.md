@@ -13,6 +13,7 @@ This repository is a fork of [assafdori/bypass-mdm](https://github.com/assafdori
 - **Interactive Menus** - Use the Up/Down arrow keys and Enter for all fixed choices
 - **Back Navigation** - Press Esc or choose Back to return before any target-volume changes begin
 - **Final Review** - Review the selected volumes, account details, UID, and plaintext password before execution
+- **Safe UI Demo** - Preview the complete workflow with simulated data and no disk, account, file, or reboot operations
 - **External Drive Guard** - `--require-external` refuses to operate on an internal installation
 - **Validation Mode** - `--validate-only` checks the selected volume pair without making changes
 - **No Volume Renaming** - Keeps the original System and Data volume names
@@ -34,6 +35,16 @@ This repository is a fork of [assafdori/bypass-mdm](https://github.com/assafdori
 - Connect to the internet before downloading the script
 - Ensure the target APFS System and Data volumes are mounted
 - A fresh macOS installation is recommended
+
+## 👀 Preview the UI Safely
+
+Download the script and start the isolated demo mode from a normal macOS Terminal:
+
+```bash
+curl -fL https://raw.githubusercontent.com/prestige12138/bypass-mdm-external/main/bypass-mdm-v2.sh -o bypass-mdm.sh && chmod +x bypass-mdm.sh && ./bypass-mdm.sh --demo
+```
+
+Demo mode shows the disk menu, Back navigation, account prompts, plaintext password, final review, execution messages, and reboot confirmation. It uses simulated `Macintosh HD` and `GoldenGate` volumes and does not inspect or modify the real Mac.
 
 ## 📋 Installation & Usage
 
