@@ -390,8 +390,8 @@ test_password_is_visible() {
 }
 
 test_all_discrete_choices_use_shared_menu() {
-	grep -Fq 'choose_menu_option "Choose an action"' "$SCRIPT" &&
-		grep -Fq 'choose_menu_option "User already exists"' "$SCRIPT" &&
+	grep -Fq 'choose_menu_option_with_back "Choose an action"' "$SCRIPT" &&
+		grep -Fq 'choose_menu_option_with_back "User already exists"' "$SCRIPT" &&
 		! grep -Fq 'select opt in' "$SCRIPT" &&
 		! grep -Fq 'Do you want to use a different username? (y/n)' "$SCRIPT"
 }
@@ -420,6 +420,72 @@ test_shared_arrow_menu_returns_selected_option() {
 	return "$status"
 }
 
+test_escape_returns_to_previous_step() {
+	local input_file
+	local output_file
+	local helpers_file
+	local menu_status
+	local status=0
+
+	helpers_file=$(mktemp "${TMPDIR:-/tmp}/bypass-mdm-menu-helpers.XXXXXX")
+	awk '$0 == "parse_arguments \"$@\"" {exit} {print}' "$SCRIPT" >"$helpers_file"
+	source "$helpers_file"
+	input_file=$(mktemp "${TMPDIR:-/tmp}/bypass-mdm-menu-input.XXXXXX")
+	output_file=$(mktemp "${TMPDIR:-/tmp}/bypass-mdm-menu-output.XXXXXX")
+	printf '\033' >"$input_file"
+
+	BYPASS_MDM_FORCE_ARROW_MENU=1
+	choose_menu_option_with_back "Test menu" "Choose an option." "First option" "Second option" <"$input_file" >"$output_file"
+	menu_status=$?
+	[ "$menu_status" -eq 2 ] || status=1
+	[ "$MENU_WENT_BACK" = true ] || status=1
+
+	rm -f "$input_file" "$output_file" "$helpers_file"
+	return "$status"
+}
+
+test_confirmation_summary_lists_all_information() {
+	local output_file
+	local helpers_file
+	local status=0
+
+	helpers_file=$(mktemp "${TMPDIR:-/tmp}/bypass-mdm-confirm-helpers.XXXXXX")
+	awk '$0 == "parse_arguments \"$@\"" {exit} {print}' "$SCRIPT" >"$helpers_file"
+	source "$helpers_file"
+	output_file=$(mktemp "${TMPDIR:-/tmp}/bypass-mdm-confirm-output.XXXXXX")
+
+	system_volume="GoldenGate"
+	data_volume="GoldenGate - Data"
+	system_path="/Volumes/GoldenGate"
+	data_path="/Volumes/GoldenGate - Data"
+	dscl_path="$data_path/private/var/db/dslocal/nodes/Default"
+	target_volume_group_id="EXTERNAL-GROUP"
+	realName="Apple Admin"
+	username="apple"
+	passw="visible-password"
+	available_uid="501"
+	print_confirmation_summary >"$output_file"
+
+	grep -Fq 'System Volume: GoldenGate' "$output_file" || status=1
+	grep -Fq 'Data Volume: GoldenGate - Data' "$output_file" || status=1
+	grep -Fq 'APFS Volume Group: EXTERNAL-GROUP' "$output_file" || status=1
+	grep -Fq 'Full Name: Apple Admin' "$output_file" || status=1
+	grep -Fq 'Username: apple' "$output_file" || status=1
+	grep -Fq 'Password: visible-password' "$output_file" || status=1
+	grep -Fq 'UID: 501' "$output_file" || status=1
+	grep -Fq 'Home Directory: /Users/apple' "$output_file" || status=1
+
+	rm -f "$output_file" "$helpers_file"
+	return "$status"
+}
+
+test_writes_are_gated_by_final_confirmation() {
+	grep -Fq 'confirm_bypass_settings' "$SCRIPT" &&
+		grep -Fq '"Confirm and Run"' "$SCRIPT" &&
+		grep -Fq 'execute_bypass' "$SCRIPT" &&
+		grep -Fq 'info "Changes are now being written and can no longer be taken back."' "$SCRIPT"
+}
+
 assert_success "selects a system volume interactively and matches its data volume" test_interactive_system_volume_selection
 assert_success "supports down-arrow and Enter system-volume selection" test_arrow_key_system_volume_selection
 assert_success "automatically uses the arrow menu on a real TTY" test_real_tty_uses_arrow_menu
@@ -435,6 +501,9 @@ assert_success "does not rename the selected data volume" test_never_renames_vol
 assert_success "shows password input and prints the password after completion" test_password_is_visible
 assert_success "uses the shared interactive menu for all discrete choices" test_all_discrete_choices_use_shared_menu
 assert_success "shared arrow menu returns the selected option" test_shared_arrow_menu_returns_selected_option
+assert_success "Escape returns to the previous menu step" test_escape_returns_to_previous_step
+assert_success "confirmation summary lists target, account, UID, and plaintext password" test_confirmation_summary_lists_all_information
+assert_success "disk writes are gated by final confirmation" test_writes_are_gated_by_final_confirmation
 
 if [ "$failures" -ne 0 ]; then
 	printf '\n%d test(s) failed\n' "$failures" >&2

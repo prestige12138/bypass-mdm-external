@@ -11,6 +11,8 @@ This repository is a fork of [assafdori/bypass-mdm](https://github.com/assafdori
 - **Automatic Data Volume Matching** - Matches the Data volume through the APFS Volume Group ID
 - **Internal/External Labels** - Clearly identifies where each macOS System volume is located
 - **Interactive Menus** - Use the Up/Down arrow keys and Enter for all fixed choices
+- **Back Navigation** - Press Esc or choose Back to return before any target-volume changes begin
+- **Final Review** - Review the selected volumes, account details, UID, and plaintext password before execution
 - **External Drive Guard** - `--require-external` refuses to operate on an internal installation
 - **Validation Mode** - `--validate-only` checks the selected volume pair without making changes
 - **No Volume Renaming** - Keeps the original System and Data volume names
@@ -62,7 +64,7 @@ To allow either an internal or external installation, omit `--require-external`:
 
 **5. Select the macOS System volume**
 
-Use the Up/Down arrow keys to move the highlight and press Enter:
+Use the Up/Down arrow keys to move the highlight and press Enter. Press Esc on later menus to return to the previous step:
 
 ```text
    Macintosh HD [Internal]
@@ -81,9 +83,22 @@ Press Enter to use the defaults:
 - **Username:** Apple
 - **Password:** 1234
 
-Password entry is visible, and the final completion message displays the selected username and password.
+Password entry is visible.
 
-**8. Reboot and sign in**
+**8. Review and confirm all settings**
+
+Before any target-volume changes are made, the script displays:
+
+- System and Data volume names and paths
+- Internal/External location and APFS Volume Group ID
+- Directory Services path
+- Full name, username, and plaintext password
+- Account status, UID, group ID, shell, and home directory
+- A list of planned changes
+
+From this page you can edit the account, change the System volume, return to the action menu, or exit without changes. Only **Confirm and Run** starts writing to the selected volumes. Once writing starts, the wizard cannot take those changes back.
+
+**9. Reboot and sign in**
 
 When the completion message appears, close Terminal and reboot the Mac.
 

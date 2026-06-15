@@ -23,6 +23,8 @@ SYSTEM_VOLUME_CANDIDATES=()
 SYSTEM_VOLUME_LABELS=()
 MENU_OPTIONS=()
 SELECTED_MENU_INDEX=0
+MENU_ALLOW_BACK=false
+MENU_WENT_BACK=false
 
 # Error handling function
 error_exit() {
@@ -376,7 +378,14 @@ choose_with_arrow_menu() {
 		case "$key" in
 		$'\033')
 			key_tail=""
-			if ! IFS= read -r -s -n 2 key_tail; then
+			if ! IFS= read -r -s -n 2 -t 1 key_tail; then
+				if [ "$MENU_ALLOW_BACK" = true ]; then
+					MENU_WENT_BACK=true
+					restore_terminal_cursor
+					trap - INT TERM EXIT
+					printf '\n'
+					return 2
+				fi
 				continue
 			fi
 			case "$key_tail" in
@@ -391,6 +400,13 @@ choose_with_arrow_menu() {
 			esac
 			;;
 		"")
+			if [ "$MENU_ALLOW_BACK" = true ] && [ "$selected_index" -eq "$((option_count - 1))" ]; then
+				MENU_WENT_BACK=true
+				restore_terminal_cursor
+				trap - INT TERM EXIT
+				printf '\n'
+				return 2
+			fi
 			SELECTED_MENU_INDEX="$selected_index"
 			restore_terminal_cursor
 			trap - INT TERM EXIT
@@ -433,6 +449,10 @@ choose_with_numbered_menu() {
 		fi
 
 		selected_index=$((selection - 1))
+		if [ "$MENU_ALLOW_BACK" = true ] && [ "$selected_index" -eq "$((${#MENU_OPTIONS[@]} - 1))" ]; then
+			MENU_WENT_BACK=true
+			return 2
+		fi
 		SELECTED_MENU_INDEX="$selected_index"
 		return
 	done
@@ -443,7 +463,11 @@ choose_menu_option() {
 	local instruction="$2"
 	shift 2
 
+	MENU_WENT_BACK=false
 	MENU_OPTIONS=("$@")
+	if [ "$MENU_ALLOW_BACK" = true ]; then
+		MENU_OPTIONS+=("← Back")
+	fi
 	[ "${#MENU_OPTIONS[@]}" -gt 0 ] || error_exit "Menu has no options"
 
 	if use_arrow_menu; then
@@ -451,6 +475,16 @@ choose_menu_option() {
 	else
 		choose_with_numbered_menu "$title"
 	fi
+}
+
+choose_menu_option_with_back() {
+	local menu_status
+
+	MENU_ALLOW_BACK=true
+	choose_menu_option "$@"
+	menu_status=$?
+	MENU_ALLOW_BACK=false
+	return "$menu_status"
 }
 
 prompt_for_system_volume() {
@@ -595,232 +629,333 @@ validate_target_volumes() {
 	fi
 }
 
-parse_arguments "$@"
-resolve_target_volumes
-validate_target_volumes
+reset_target_selection() {
+	requested_system_volume=""
+	requested_data_volume=""
+	system_volume=""
+	data_volume=""
+	system_path=""
+	data_path=""
+	dscl_path=""
+	target_volume_group_id=""
+}
 
-# Display header
-echo ""
-echo -e "${CYAN}╔═══════════════════════════════════════════════╗${NC}"
-echo -e "${CYAN}║  Bypass MDM By Assaf Dori (assafdori.com)   ║${NC}"
-echo -e "${CYAN}╚═══════════════════════════════════════════════╝${NC}"
-echo ""
-success "System Volume: $system_volume"
-success "Data Volume: $data_volume"
-echo ""
+display_selected_target() {
+	echo ""
+	echo -e "${CYAN}╔═══════════════════════════════════════════════╗${NC}"
+	echo -e "${CYAN}║  Bypass MDM By Assaf Dori (assafdori.com)   ║${NC}"
+	echo -e "${CYAN}╚═══════════════════════════════════════════════╝${NC}"
+	echo ""
+	success "System Volume: $system_volume"
+	success "Data Volume: $data_volume"
+	echo ""
+}
 
-if [ "$validate_only" = true ]; then
-	success "Target volume pair validated; no changes were made"
-	exit 0
-fi
+collect_account_information() {
+	local validation_msg
+	local menu_status
 
-if [ "$(id -u)" -ne 0 ]; then
-	error_exit "Run this script as root from macOS Recovery"
-fi
+	echo -e "${CYAN}Creating Temporary Admin User${NC}"
+	echo -e "${NC}Press Enter to use defaults (recommended)${NC}"
 
-# Prompt user for choice
-choose_menu_option "Choose an action" "Use Up/Down arrows, then press Enter." \
-	"Bypass MDM from Recovery" \
-	"Reboot & Exit"
+	read -p "Enter Temporary Fullname (Default is 'Apple'): " realName
+	realName="${realName:=Apple}"
 
-case "$SELECTED_MENU_INDEX" in
-0)
-		echo ""
-		echo -e "${YEL}═══════════════════════════════════════${NC}"
-		echo -e "${YEL}  Starting MDM Bypass Process${NC}"
-		echo -e "${YEL}═══════════════════════════════════════${NC}"
-		echo ""
+	while true; do
+		read -p "Enter Temporary Username (Default is 'Apple'): " username
+		username="${username:=Apple}"
 
-		# Validate critical paths
-		info "Validating system paths..."
-
-		if [ ! -d "$system_path" ]; then
-			error_exit "System volume path does not exist: $system_path"
+		if ! validation_msg=$(validate_username "$username"); then
+			warn "$validation_msg"
+			echo -e "${YEL}Please try again or press Ctrl+C to exit${NC}"
+			continue
 		fi
 
-		if [ ! -d "$data_path" ]; then
-			error_exit "Data volume path does not exist: $data_path"
+		if ! check_user_exists "$dscl_path" "$username"; then
+			break
 		fi
 
-		if [ ! -d "$dscl_path" ]; then
-			error_exit "Directory Services path does not exist: $dscl_path"
+		warn "User '$username' already exists in the system"
+		choose_menu_option_with_back "User already exists" "Choose how to continue. Esc returns to username entry." \
+			"Use a different username" \
+			"Continue with the existing username"
+		menu_status=$?
+		if [ "$menu_status" -eq 2 ] || [ "$SELECTED_MENU_INDEX" -eq 0 ]; then
+			continue
 		fi
 
-		success "All system paths validated"
-		echo ""
+		warn "Continuing with existing user '$username' (may cause conflicts)"
+		break
+	done
 
-		# Create Temporary User
-		echo -e "${CYAN}Creating Temporary Admin User${NC}"
-		echo -e "${NC}Press Enter to use defaults (recommended)${NC}"
+	while true; do
+		read -p "Enter Temporary Password (Default is '1234'): " passw
+		passw="${passw:=1234}"
 
-		# Get and validate real name
-		read -p "Enter Temporary Fullname (Default is 'Apple'): " realName
-		realName="${realName:=Apple}"
-
-		# Get and validate username
-		while true; do
-			read -p "Enter Temporary Username (Default is 'Apple'): " username
-			username="${username:=Apple}"
-
-			if validation_msg=$(validate_username "$username"); then
-				break
-			else
-				warn "$validation_msg"
-				echo -e "${YEL}Please try again or press Ctrl+C to exit${NC}"
-			fi
-		done
-
-		# Check if user already exists
-		if check_user_exists "$dscl_path" "$username"; then
-			warn "User '$username' already exists in the system"
-			choose_menu_option "User already exists" "Choose how to continue." \
-				"Use a different username" \
-				"Continue with the existing username"
-			if [ "$SELECTED_MENU_INDEX" -eq 0 ]; then
-				while true; do
-					read -p "Enter a different username: " username
-					if [ -z "$username" ]; then
-						warn "Username cannot be empty"
-						continue
-					fi
-					if validation_msg=$(validate_username "$username"); then
-						if ! check_user_exists "$dscl_path" "$username"; then
-							break
-						else
-							warn "User '$username' also exists. Try another name."
-						fi
-					else
-						warn "$validation_msg"
-					fi
-				done
-			else
-				warn "Continuing with existing user '$username' (may cause conflicts)"
-			fi
+		if validation_msg=$(validate_password "$passw"); then
+			break
 		fi
 
-		# Get and validate password
-		while true; do
-			read -p "Enter Temporary Password (Default is '1234'): " passw
-			passw="${passw:=1234}"
+		warn "$validation_msg"
+		echo -e "${YEL}Please try again or press Ctrl+C to exit${NC}"
+	done
+}
 
-			if validation_msg=$(validate_password "$passw"); then
-				break
-			else
-				warn "$validation_msg"
-				echo -e "${YEL}Please try again or press Ctrl+C to exit${NC}"
-			fi
-		done
-
-		echo ""
-
-		info "Revalidating target volume pair before writing..."
-		validate_target_volumes
-		success "Target volume pair is unchanged"
-		echo ""
-
-		# Find available UID
-		info "Checking for available UID..."
-		available_uid=$(find_available_uid "$dscl_path")
-		if [ $? -eq 0 ] && [ "$available_uid" != "501" ]; then
+prepare_available_uid() {
+	info "Checking for available UID..."
+	if available_uid=$(find_available_uid "$dscl_path"); then
+		if [ "$available_uid" != "501" ]; then
 			info "UID 501 is in use, using UID $available_uid instead"
+		fi
+	else
+		available_uid="501"
+	fi
+	success "Using UID: $available_uid"
+}
+
+print_confirmation_summary() {
+	local location_label
+	local account_status="New account"
+
+	location_label=$(volume_location_label "$system_path")
+	if check_user_exists "$dscl_path" "$username"; then
+		account_status="Existing account will be updated"
+	fi
+
+	echo ""
+	echo -e "${CYAN}════════════ Final Confirmation ════════════${NC}"
+	echo ""
+	echo "Action: Bypass MDM from Recovery"
+	echo "System Volume: $system_volume"
+	echo "System Path: $system_path"
+	echo "Data Volume: $data_volume"
+	echo "Data Path: $data_path"
+	echo "Target Location: $location_label"
+	echo "APFS Volume Group: $target_volume_group_id"
+	echo "Directory Services: $dscl_path"
+	echo ""
+	echo "Full Name: $realName"
+	echo "Username: $username"
+	echo "Password: $passw"
+	echo "Account Status: $account_status"
+	echo "UID: $available_uid"
+	echo "Primary Group ID: 20"
+	echo "Shell: /bin/zsh"
+	echo "Home Directory: /Users/$username"
+	echo "Admin Group: Yes"
+	echo ""
+	echo "Planned Changes:"
+	echo "  - Create or update the local administrator account"
+	echo "  - Create the user home directory on the selected Data volume"
+	echo "  - Add MDM enrollment domains to the selected System volume hosts file"
+	echo "  - Mark Setup Assistant as complete"
+	echo "  - Update local cloud configuration markers"
+	echo ""
+	warn "After confirmation, these changes cannot be taken back by this wizard."
+	echo ""
+}
+
+confirm_bypass_settings() {
+	local menu_status
+
+	print_confirmation_summary
+	choose_menu_option_with_back "Review all settings" "Use Up/Down and Enter. Esc returns to account editing." \
+		"Confirm and Run" \
+		"Edit Account Information" \
+		"Change System Volume" \
+		"Back to Action Menu" \
+		"Exit Without Changes"
+	menu_status=$?
+
+	if [ "$menu_status" -eq 2 ]; then
+		return 10
+	fi
+
+	case "$SELECTED_MENU_INDEX" in
+	0) return 0 ;;
+	1) return 10 ;;
+	2) return 11 ;;
+	3) return 12 ;;
+	4) return 13 ;;
+	esac
+
+	return 13
+}
+
+execute_bypass() {
+	local user_home
+	local hosts_file
+	local config_path
+
+	echo ""
+	echo -e "${YEL}═══════════════════════════════════════${NC}"
+	echo -e "${YEL}  Starting MDM Bypass Process${NC}"
+	echo -e "${YEL}═══════════════════════════════════════${NC}"
+	echo ""
+
+	info "Revalidating target volume pair before writing..."
+	validate_target_volumes
+	success "Target volume pair is unchanged"
+	info "Changes are now being written and can no longer be taken back."
+	echo ""
+
+	info "Creating user account: $username"
+	if ! dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" 2>/dev/null; then
+		error_exit "Failed to create user account"
+	fi
+
+	dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" UserShell "/bin/zsh" || warn "Failed to set user shell"
+	dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" RealName "$realName" || warn "Failed to set real name"
+	dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" UniqueID "$available_uid" || warn "Failed to set UID"
+	dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" PrimaryGroupID "20" || warn "Failed to set GID"
+
+	user_home="$data_path/Users/$username"
+	if [ ! -d "$user_home" ]; then
+		if mkdir -p "$user_home" 2>/dev/null; then
+			success "Created user home directory"
 		else
-			available_uid="501"
+			error_exit "Failed to create user home directory: $user_home"
 		fi
-		success "Using UID: $available_uid"
-		echo ""
+	else
+		warn "User home directory already exists: $user_home"
+	fi
 
-		# Create User with error handling
-		info "Creating user account: $username"
+	dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" NFSHomeDirectory "/Users/$username" || warn "Failed to set home directory"
 
-		if ! dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" 2>/dev/null; then
-			error_exit "Failed to create user account"
-		fi
+	if ! dscl -f "$dscl_path" localhost -passwd "/Local/Default/Users/$username" "$passw" 2>/dev/null; then
+		error_exit "Failed to set user password"
+	fi
 
-		dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" UserShell "/bin/zsh" || warn "Failed to set user shell"
-		dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" RealName "$realName" || warn "Failed to set real name"
-		dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" UniqueID "$available_uid" || warn "Failed to set UID"
-		dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" PrimaryGroupID "20" || warn "Failed to set GID"
+	if ! dscl -f "$dscl_path" localhost -append "/Local/Default/Groups/admin" GroupMembership "$username" 2>/dev/null; then
+		error_exit "Failed to add user to admin group"
+	fi
 
-		user_home="$data_path/Users/$username"
-		if [ ! -d "$user_home" ]; then
-			if mkdir -p "$user_home" 2>/dev/null; then
-				success "Created user home directory"
-			else
-				error_exit "Failed to create user home directory: $user_home"
-			fi
+	success "User account created successfully"
+	echo ""
+
+	info "Blocking MDM enrollment domains..."
+	hosts_file="$system_path/etc/hosts"
+	if [ ! -f "$hosts_file" ]; then
+		warn "Hosts file does not exist, creating it"
+		touch "$hosts_file" || error_exit "Failed to create hosts file"
+	fi
+
+	grep -q "deviceenrollment.apple.com" "$hosts_file" 2>/dev/null || echo "0.0.0.0 deviceenrollment.apple.com" >>"$hosts_file"
+	grep -q "mdmenrollment.apple.com" "$hosts_file" 2>/dev/null || echo "0.0.0.0 mdmenrollment.apple.com" >>"$hosts_file"
+	grep -q "iprofiles.apple.com" "$hosts_file" 2>/dev/null || echo "0.0.0.0 iprofiles.apple.com" >>"$hosts_file"
+	success "MDM domains blocked in hosts file"
+	echo ""
+
+	info "Configuring MDM bypass settings..."
+	config_path="$system_path/var/db/ConfigurationProfiles/Settings"
+	if [ ! -d "$config_path" ]; then
+		if mkdir -p "$config_path" 2>/dev/null; then
+			success "Created configuration directory"
 		else
-			warn "User home directory already exists: $user_home"
+			warn "Could not create configuration directory"
 		fi
+	fi
 
-		dscl -f "$dscl_path" localhost -create "/Local/Default/Users/$username" NFSHomeDirectory "/Users/$username" || warn "Failed to set home directory"
+	touch "$data_path/private/var/db/.AppleSetupDone" 2>/dev/null && success "Marked setup as complete" || warn "Could not mark setup as complete"
+	rm -rf "$config_path/.cloudConfigHasActivationRecord" 2>/dev/null && success "Removed activation record" || info "No activation record to remove"
+	rm -rf "$config_path/.cloudConfigRecordFound" 2>/dev/null && success "Removed cloud config record" || info "No cloud config record to remove"
+	touch "$config_path/.cloudConfigProfileInstalled" 2>/dev/null && success "Created profile installed marker" || warn "Could not create profile marker"
+	touch "$config_path/.cloudConfigRecordNotFound" 2>/dev/null && success "Created record not found marker" || warn "Could not create not found marker"
 
-		if ! dscl -f "$dscl_path" localhost -passwd "/Local/Default/Users/$username" "$passw" 2>/dev/null; then
-			error_exit "Failed to set user password"
-		fi
+	echo ""
+	echo -e "${GRN}╔═══════════════════════════════════════════════╗${NC}"
+	echo -e "${GRN}║       MDM Bypass Completed Successfully!     ║${NC}"
+	echo -e "${GRN}╚═══════════════════════════════════════════════╝${NC}"
+	echo ""
+	echo -e "${CYAN}Next steps:${NC}"
+	echo -e "  1. Close this terminal window"
+	echo -e "  2. Reboot your Mac"
+	echo -e "  3. Login with username: ${YEL}$username${NC} and password: ${YEL}$passw${NC}"
+	echo ""
+}
 
-		if ! dscl -f "$dscl_path" localhost -append "/Local/Default/Groups/admin" GroupMembership "$username" 2>/dev/null; then
-			error_exit "Failed to add user to admin group"
-		fi
+run_bypass_wizard() {
+	local confirmation_status
 
-		success "User account created successfully"
+	while true; do
+		collect_account_information
 		echo ""
+		prepare_available_uid
 
-		# Block MDM domains
-		info "Blocking MDM enrollment domains..."
+		confirm_bypass_settings
+		confirmation_status=$?
+		case "$confirmation_status" in
+		0)
+			execute_bypass
+			return 0
+			;;
+		10) continue ;;
+		11) return 11 ;;
+		12) return 12 ;;
+		13) return 13 ;;
+		esac
+	done
+}
 
-		hosts_file="$system_path/etc/hosts"
-		if [ ! -f "$hosts_file" ]; then
-			warn "Hosts file does not exist, creating it"
-			touch "$hosts_file" || error_exit "Failed to create hosts file"
+parse_arguments "$@"
+
+while true; do
+	resolve_target_volumes
+	validate_target_volumes
+	display_selected_target
+
+	if [ "$validate_only" = true ]; then
+		success "Target volume pair validated; no changes were made"
+		exit 0
+	fi
+
+	if [ "$(id -u)" -ne 0 ]; then
+		error_exit "Run this script as root from macOS Recovery"
+	fi
+
+	while true; do
+		choose_menu_option_with_back "Choose an action" "Use Up/Down and Enter. Esc returns to volume selection." \
+			"Bypass MDM from Recovery" \
+			"Reboot & Exit" \
+			"Exit Without Changes"
+		menu_status=$?
+
+		if [ "$menu_status" -eq 2 ]; then
+			reset_target_selection
+			break
 		fi
 
-		# Check if entries already exist to avoid duplicates
-		grep -q "deviceenrollment.apple.com" "$hosts_file" 2>/dev/null || echo "0.0.0.0 deviceenrollment.apple.com" >>"$hosts_file"
-		grep -q "mdmenrollment.apple.com" "$hosts_file" 2>/dev/null || echo "0.0.0.0 mdmenrollment.apple.com" >>"$hosts_file"
-		grep -q "iprofiles.apple.com" "$hosts_file" 2>/dev/null || echo "0.0.0.0 iprofiles.apple.com" >>"$hosts_file"
-
-		success "MDM domains blocked in hosts file"
-		echo ""
-
-		# Remove configuration profiles
-		info "Configuring MDM bypass settings..."
-
-		config_path="$system_path/var/db/ConfigurationProfiles/Settings"
-
-		# Create config directory if it doesn't exist
-		if [ ! -d "$config_path" ]; then
-			if mkdir -p "$config_path" 2>/dev/null; then
-				success "Created configuration directory"
-			else
-				warn "Could not create configuration directory"
+		case "$SELECTED_MENU_INDEX" in
+		0)
+			run_bypass_wizard
+			wizard_status=$?
+			case "$wizard_status" in
+			0) exit 0 ;;
+			11)
+				reset_target_selection
+				break
+				;;
+			12) continue ;;
+			13)
+				info "Exited without making changes."
+				exit 0
+				;;
+			esac
+			;;
+		1)
+			choose_menu_option_with_back "Confirm reboot" "Reboot has not started. Esc returns to the action menu." \
+				"Reboot Now"
+			if [ $? -eq 2 ]; then
+				continue
 			fi
-		fi
-
-		# Mark setup as done
-		touch "$data_path/private/var/db/.AppleSetupDone" 2>/dev/null && success "Marked setup as complete" || warn "Could not mark setup as complete"
-
-		# Remove activation records
-		rm -rf "$config_path/.cloudConfigHasActivationRecord" 2>/dev/null && success "Removed activation record" || info "No activation record to remove"
-		rm -rf "$config_path/.cloudConfigRecordFound" 2>/dev/null && success "Removed cloud config record" || info "No cloud config record to remove"
-
-		# Create bypass markers
-		touch "$config_path/.cloudConfigProfileInstalled" 2>/dev/null && success "Created profile installed marker" || warn "Could not create profile marker"
-		touch "$config_path/.cloudConfigRecordNotFound" 2>/dev/null && success "Created record not found marker" || warn "Could not create not found marker"
-
-		echo ""
-		echo -e "${GRN}╔═══════════════════════════════════════════════╗${NC}"
-		echo -e "${GRN}║       MDM Bypass Completed Successfully!     ║${NC}"
-		echo -e "${GRN}╚═══════════════════════════════════════════════╝${NC}"
-		echo ""
-		echo -e "${CYAN}Next steps:${NC}"
-		echo -e "  1. Close this terminal window"
-		echo -e "  2. Reboot your Mac"
-		echo -e "  3. Login with username: ${YEL}$username${NC} and password: ${YEL}$passw${NC}"
-		echo ""
-		;;
-1)
-		echo ""
-		info "Rebooting system..."
-		reboot
-		;;
-esac
+			info "Rebooting system..."
+			reboot
+			exit 0
+			;;
+		2)
+			info "Exited without making changes."
+			exit 0
+			;;
+		esac
+	done
+done
