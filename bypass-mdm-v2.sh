@@ -376,16 +376,23 @@ render_arrow_menu() {
 	local selected_index="$1"
 	local title="$2"
 	local instruction="$3"
+	local redraw="${4:-false}"
 	local index=0
+	local menu_line_count
 
-	printf '\033[u\033[J'
-	printf '%s\n' "$title"
-	printf '%s\n\n' "$instruction"
+	menu_line_count=$((${#MENU_OPTIONS[@]} + 3))
+
+	if [ "$redraw" = true ]; then
+		printf '\033[%dA' "$menu_line_count"
+	fi
+	printf '\r\033[2K%s\n' "$title"
+	printf '\r\033[2K%s\n' "$instruction"
+	printf '\r\033[2K\n'
 	while [ "$index" -lt "${#MENU_OPTIONS[@]}" ]; do
 		if [ "$index" -eq "$selected_index" ]; then
-			printf ' \033[7m> %s\033[0m\n' "${MENU_OPTIONS[$index]}"
+			printf '\r\033[2K \033[7m> %s\033[0m\n' "${MENU_OPTIONS[$index]}"
 		else
-			printf '   %s\n' "${MENU_OPTIONS[$index]}"
+			printf '\r\033[2K   %s\n' "${MENU_OPTIONS[$index]}"
 		fi
 		index=$((index + 1))
 	done
@@ -398,13 +405,15 @@ choose_with_arrow_menu() {
 	local key
 	local key_tail
 	local option_count="${#MENU_OPTIONS[@]}"
+	local menu_rendered=false
 
-	printf '\033[?25l\033[s'
+	printf '\033[?25l'
 	trap 'restore_terminal_cursor; exit 130' INT TERM
 	trap 'restore_terminal_cursor' EXIT
 
 	while true; do
-		render_arrow_menu "$selected_index" "$title" "$instruction"
+		render_arrow_menu "$selected_index" "$title" "$instruction" "$menu_rendered"
+		menu_rendered=true
 		key=""
 		if ! IFS= read -r -s -n 1 key; then
 			restore_terminal_cursor

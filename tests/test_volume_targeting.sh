@@ -420,6 +420,29 @@ test_shared_arrow_menu_returns_selected_option() {
 	return "$status"
 }
 
+test_arrow_menu_redraws_in_place_without_saved_cursor() {
+	local helpers_file
+	local output_file
+	local status=0
+
+	helpers_file=$(mktemp "${TMPDIR:-/tmp}/bypass-mdm-redraw-helpers.XXXXXX")
+	awk '$0 == "parse_arguments \"$@\"" {exit} {print}' "$SCRIPT" >"$helpers_file"
+	source "$helpers_file"
+	output_file=$(mktemp "${TMPDIR:-/tmp}/bypass-mdm-redraw-output.XXXXXX")
+	MENU_OPTIONS=("First option" "Second option")
+
+	render_arrow_menu 0 "Test menu" "Choose an option." false >"$output_file"
+	render_arrow_menu 1 "Test menu" "Choose an option." true >>"$output_file"
+
+	grep -Fq $'\033[5A' "$output_file" || status=1
+	if grep -Fq $'\033[s' "$output_file" || grep -Fq $'\033[u' "$output_file"; then
+		status=1
+	fi
+
+	rm -f "$output_file" "$helpers_file"
+	return "$status"
+}
+
 test_escape_returns_to_previous_step() {
 	local input_file
 	local output_file
@@ -554,6 +577,7 @@ assert_success "does not rename the selected data volume" test_never_renames_vol
 assert_success "shows password input and prints the password after completion" test_password_is_visible
 assert_success "uses the shared interactive menu for all discrete choices" test_all_discrete_choices_use_shared_menu
 assert_success "shared arrow menu returns the selected option" test_shared_arrow_menu_returns_selected_option
+assert_success "arrow menu redraws in place without saved-cursor sequences" test_arrow_menu_redraws_in_place_without_saved_cursor
 assert_success "Escape returns to the previous menu step" test_escape_returns_to_previous_step
 assert_success "confirmation summary lists target, account, UID, and plaintext password" test_confirmation_summary_lists_all_information
 assert_success "disk writes are gated by final confirmation" test_writes_are_gated_by_final_confirmation
